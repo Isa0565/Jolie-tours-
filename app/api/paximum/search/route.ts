@@ -39,6 +39,14 @@ async function getAuthToken(): Promise<string> {
   return data.body.token;
 }
 
+function calculateNights(departureDate: string, returnDate: string): number {
+  const departure = new Date(departureDate);
+  const returnD = new Date(returnDate);
+  const diffTime = Math.abs(returnD.getTime() - departure.getTime());
+  const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+  return diffDays;
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -51,7 +59,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Build Paximum payload (NO TOKEN REQUIRED for PriceSearch)
+    // Get authentication token (REQUIRED for PriceSearch)
+    const token = await getAuthToken();
+
+    // Build Paximum payload
     const serviceType = body.returnDate ? '2' : '1'; // 2=RoundTrip, 1=OneWay
     
     const paximumPayload: any = {
@@ -61,13 +72,13 @@ export async function POST(request: NextRequest) {
       DepartureLocations: [
         {
           id: body.from.toUpperCase(),
-          type: 2 // Type 2 for IATA code
+          type: 5 // Type 5 for Airport (IATA code)
         }
       ],
       ArrivalLocations: [
         {
           id: body.to.toUpperCase(),
-          type: 2 // Type 2 for IATA code
+          type: 5 // Type 5 for Airport (IATA code)
         }
       ],
       Passengers: [
@@ -109,19 +120,21 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // For RoundTrip, add return date
+    // For RoundTrip, add Night (number of nights, NOT CheckOut)
     if (body.returnDate) {
-      paximumPayload.CheckOut = body.returnDate;
+      const nights = calculateNights(body.departureDate, body.returnDate);
+      paximumPayload.Night = nights;
     }
 
     console.log('🚀 Paximum Request:', JSON.stringify(paximumPayload, null, 2));
 
-    // Call Paximum API (NO Authorization needed for PriceSearch)
+    // Call Paximum API WITH Authorization header
     const searchResponse = await fetch(`${PAXIMUM_API_BASE}/api/productservice/pricesearch`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Accept': 'application/json'
+        'Accept': 'application/json',
+        'Authorization': `Bearer ${token}` // REQUIRED
       },
       body: JSON.stringify(paximumPayload)
     });
@@ -140,22 +153,27 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Extract flights with offers
+    // Extract flights with offers (USE flight.items NOT flight.legs)
     const flights = searchData.body?.flights || [];
     const offers = [];
 
     for (const flight of flights) {
       if (flight.offers && flight.offers.length > 0) {
         for (const offer of flight.offers) {
+          // Use flight.items (CORRECT structure from real API response)
+          const firstItem = flight.items?.[0];
+          const firstSegment = firstItem?.segments?.[0];
+          const lastSegment = firstItem?.segments?.[firstItem.segments.length - 1];
+
           offers.push({
             offerId: offer.offerId,
             price: offer.price?.amount || 0,
             currency: offer.price?.currency || 'EUR',
-            airline: flight.legs?.[0]?.segments?.[0]?.operatingAirline?.name || 'Unknown',
-            departure: flight.legs?.[0]?.segments?.[0]?.departureDate,
-            arrival: flight.legs?.[0]?.segments?.[flight.legs[0].segments.length - 1]?.arrivalDate,
-            duration: flight.legs?.[0]?.duration,
-            stops: (flight.legs?.[0]?.segments?.length || 1) - 1,
+            airline: firstSegment?.operatingAirline?.name || 'Unknown',
+            departure: firstSegment?.departureDate,
+            arrival: lastSegment?.arrivalDate,
+            duration: firstItem?.duration,
+            stops: (firstItem?.segments?.length || 1) - 1,
             cabinClass: offer.services?.[0]?.cabinClass?.name || 'Economy'
           });
         }
